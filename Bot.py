@@ -1054,7 +1054,10 @@ async def scrape_auctions(
     
     for page_num in range(1, MAX_PAGES + 1):
         try:
-            await page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+            response = await page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+            status = response.status if response else "unknown"
+            title = await page.title()
+            logger.info(f"Loaded page {page_num}: {current_url} | Status: {status} | Title: {title}")
         except Exception as e:
             logger.error(f"Failed to load page {page_num}: {e}")
             break
@@ -1219,7 +1222,10 @@ async def main() -> None:
                     pages = []
                     for _ in config.target_urls:
                         try:
-                            page = await browser.new_page()
+                            # Use a realistic User-Agent to prevent basic headless detection
+                            page = await browser.new_page(
+                                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                            )
                             pages.append(page)
                         except Exception as e:
                             logger.error(f"Failed to create page: {e}")
