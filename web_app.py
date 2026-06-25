@@ -19,7 +19,7 @@ import database
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'auction-bot-secret-key-change-in-production')
-socketio = SocketIO(app, async_mode='threading')
+socketio = SocketIO(app, async_mode='eventlet')
 
 # Simple authentication
 AUTH_USERNAME = os.getenv('AUTH_USERNAME')
@@ -88,14 +88,18 @@ except Exception as e:
 @app.route('/')
 def index():
     """Main dashboard page."""
-    config = load_config()
-    posted_count = database.get_total_posted_count()
-    return render_template('index.html', 
-                         config=config,
-                         posted_count=posted_count,
-                         bot_running=Bot.bot_running_flag,
-                         stats=last_stats,
-                         authenticated=session.get('authenticated', False))
+    try:
+        config = load_config()
+        posted_count = database.get_total_posted_count()
+        return render_template('index.html', 
+                             config=config,
+                             posted_count=posted_count,
+                             bot_running=Bot.bot_running_flag,
+                             stats=last_stats,
+                             authenticated=session.get('authenticated', False))
+    except Exception as e:
+        bot_logger.error(f"Error rendering index: {e}")
+        return f"<h1>Server Error</h1><pre>{e}</pre>", 500
 
 # ==================== AUTH ROUTES ====================
 
