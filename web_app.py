@@ -1,9 +1,26 @@
+import os
+import sys
+
+# Load environment variables from .env file before anything else
+from dotenv import load_dotenv
+load_dotenv()
+
+# Eventlet compatibility check for Python 3.12+ (where Eventlet is highly broken)
+use_eventlet = False
+try:
+    import eventlet
+    # Check if importing eventlet green components crashes (common on Python 3.12)
+    from eventlet.green import ssl as _green_ssl
+    use_eventlet = True
+except (ImportError, AttributeError):
+    # Hide eventlet from Flask-SocketIO so it safely falls back to standard threading locally
+    sys.modules['eventlet'] = None
+
 from flask import Flask, render_template, jsonify, request, session, Response
 from flask_socketio import SocketIO, emit
 from functools import wraps
 import threading
 from collections import deque
-import os
 import json
 import logging
 import time
@@ -19,7 +36,7 @@ import database
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'auction-bot-secret-key-change-in-production')
-socketio = SocketIO(app, async_mode='eventlet')
+socketio = SocketIO(app, async_mode='eventlet' if use_eventlet else 'threading')
 
 # Simple authentication
 AUTH_USERNAME = os.getenv('AUTH_USERNAME')
@@ -163,7 +180,8 @@ def get_config():
         'business_hours_start': config.business_hours_start,
         'business_hours_end': config.business_hours_end,
         'business_days': config.business_days,
-        'chat_ids': config.chat_ids
+        'chat_ids': config.chat_ids,
+        'post_template': config.post_template
     })
 
 @app.route('/api/config', methods=['POST'])
@@ -184,6 +202,7 @@ def update_config():
         business_hours_end = data.get('business_hours_end')
         business_days = data.get('business_days')
         chat_ids = data.get('chat_ids')
+        post_template = data.get('post_template')
         
         if target_urls:
             if not isinstance(target_urls, list):
@@ -249,6 +268,8 @@ def update_config():
             config.business_days = business_days if isinstance(business_days, list) else []
         if chat_ids is not None:
             config.chat_ids = chat_ids if isinstance(chat_ids, list) else []
+        if post_template is not None:
+            config.post_template = post_template
         
         if save_config(config):
             last_stats['target_url'] = config.target_urls[0] if config.target_urls else ''
@@ -265,7 +286,8 @@ def update_config():
                 'business_hours_start': config.business_hours_start,
                 'business_hours_end': config.business_hours_end,
                 'business_days': config.business_days,
-                'chat_ids': config.chat_ids
+                'chat_ids': config.chat_ids,
+                'post_template': config.post_template
             })
             return jsonify({'success': True})
         else:
@@ -437,5 +459,5 @@ if __name__ == '__main__':
     last_stats['check_interval'] = config.check_interval
     last_stats['posted_count'] = database.get_total_posted_count()
     
-    print("🚀 Web Interface starting on http://localhost:5000")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    print("--> Web Interface starting on http://localhost:5000")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

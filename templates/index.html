@@ -1229,6 +1229,22 @@
                                     <i class="fas fa-plus"></i> Add Channel
                                 </button>
                             </div>
+                            
+                            <!-- Post Template -->
+                            <div class="form-section-title"><i class="fas fa-file-alt"></i> Telegram Post Template</div>
+                            <div class="form-group full-width">
+                                <label class="form-label">Message Format Template (HTML supported)</label>
+                                <textarea id="postTemplateInput" class="form-input" rows="8" style="font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 13px; height: 180px; resize: vertical;" placeholder="Enter message format template...">{{ config.post_template }}</textarea>
+                                <div style="font-size: 11px; color: var(--text-muted); margin-top: 6px; line-height: 1.4;">
+                                    <strong>Available Placeholders:</strong><br>
+                                    • <code>{name}</code>: Asset Name<br>
+                                    • <code>{lot_no}</code>: Lot Number<br>
+                                    • <code>{initial_price}</code>: Price<br>
+                                    • <code>{end_date_time}</code>: End Date/Time<br>
+                                    • <code>{auction_type}</code>: Auction Type (Open Bidding / Sealed Bid)<br>
+                                    • <code>{target_url}</code>: Link to details page
+                                </div>
+                            </div>
 
                             <button type="submit" class="btn btn-primary" style="margin-top:12px;">
                                 <i class="fas fa-save"></i> Save Configuration
@@ -1384,6 +1400,7 @@
         document.getElementById('businessDaysInput').value = data.business_days ? data.business_days.join(', ') : '';
         rebuildList('urlList', 'target_urls', data.target_urls, 'url');
         rebuildList('channelList', 'chat_ids', data.chat_ids, 'text');
+        document.getElementById('postTemplateInput').value = data.post_template || '';
         showToast('Configuration updated!', 'success');
     });
 
@@ -1496,7 +1513,8 @@
                     business_hours_start: document.getElementById('businessHoursStartInput').value || null,
                     business_hours_end: document.getElementById('businessHoursEndInput').value || null,
                     business_days: bizDays ? bizDays.split(',').map(s => parseInt(s.trim())) : [],
-                    chat_ids: chatIds
+                    chat_ids: chatIds,
+                    post_template: document.getElementById('postTemplateInput').value
                 })
             });
             const d = await r.json();

@@ -39,9 +39,22 @@ def init_database():
                 posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 category TEXT,
                 name TEXT,
-                price TEXT
+                price TEXT,
+                end_date TEXT,
+                closing_soon_sent INTEGER DEFAULT 0
             )
         """)
+        
+        # Migrations for existing databases
+        try:
+            cursor.execute("ALTER TABLE posted_auctions ADD COLUMN end_date TEXT")
+        except sqlite3.OperationalError:
+            pass # Already exists
+            
+        try:
+            cursor.execute("ALTER TABLE posted_auctions ADD COLUMN closing_soon_sent INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass # Already exists
         
         # Daily posts table
         cursor.execute("""
@@ -121,24 +134,76 @@ def clear_posted_auctions():
         cursor.execute("DELETE FROM posted_auctions")
         logger.info("Posted auctions history cleared")
 
-def save_posted_auctions(lot_numbers: List[str], category: str = "", name: str = "", price: str = ""):
+def save_posted_auctions(lot_numbers: List[str], category: str = "", name: str = "", price: str = "", end_date: str = ""):
     """Save posted auctions to database."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         for lot_no in lot_numbers:
             cursor.execute("""
-                INSERT OR IGNORE INTO posted_auctions (lot_no, category, name, price)
-                VALUES (?, ?, ?, ?)
-            """, (lot_no, category, name, price))
+                INSERT OR REPLACE INTO posted_auctions (lot_no, category, name, price, end_date)
+                VALUES (?, ?, ?, ?, ?)
+            """, (lot_no, category, name, price, end_date))
 
-def add_posted_auction(lot_no: str, category: str = "", name: str = "", price: str = ""):
+def add_posted_auction(lot_no: str, category: str = "", name: str = "", price: str = "", end_date: str = ""):
     """Add a single posted auction."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR IGNORE INTO posted_auctions (lot_no, category, name, price)
-            VALUES (?, ?, ?, ?)
-        """, (lot_no, category, name, price))
+            INSERT OR REPLACE INTO posted_auctions (lot_no, category, name, price, end_date)
+            VALUES (?, ?, ?, ?, ?)
+        """, (lot_no, category, name, price, end_date))
+
+def get_auctions_needing_closing_alert(now_str: str, alert_threshold_minutes: int = 60) -> List[Dict[str, Any]]:
+    """Get auctions ending within the alert threshold that haven't had alerts sent."""
+    from datetime import timedelta
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT lot_no, category, name, price, end_date
+            FROM posted_auctions
+            WHERE closing_soon_sent = 0 AND end_date IS NOT NULL AND end_date != '' AND end_date != 'N/A'
+        """)
+        
+        results = []
+        for row in cursor.fetchall():
+            lot_no = row['lot_no']
+            category = row['category']
+            name = row['name']
+            price = row['price']
+            end_date_str = row['end_date']
+            
+            try:
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                try:
+                    end_dt = datetime.strptime(end_date_str, "%Y-%m-%d %H:%M")
+                except ValueError:
+                    continue # Skip unparseable dates
+            
+            now_dt = datetime.strptime(now_str, "%Y-%m-%d %H:%M:%S")
+            time_diff = end_dt - now_dt
+            
+            if timedelta(seconds=0) < time_diff <= timedelta(minutes=alert_threshold_minutes):
+                minutes_left = int(time_diff.total_seconds() / 60)
+                results.append({
+                    'lot_no': lot_no,
+                    'category': category,
+                    'name': name,
+                    'price': price,
+                    'end_date': end_date_str,
+                    'minutes_left': minutes_left
+                })
+        return results
+
+def mark_closing_alert_sent(lot_no: str):
+    """Mark that a closing soon alert has been sent for this lot."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE posted_auctions
+            SET closing_soon_sent = 1
+            WHERE lot_no = ?
+        """, (lot_no,))
 
 def load_daily_posts() -> Dict[str, Dict[str, int]]:
     """Load daily post counts."""

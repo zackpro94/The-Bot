@@ -11,6 +11,11 @@ from datetime import datetime
 from urllib.parse import urlparse
 import requests
 from playwright.async_api import async_playwright, Browser, Page
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
 import database
 
 # ==================== CONFIGURATION ====================
@@ -83,6 +88,7 @@ if not ADMIN_CHAT_ID:
 # Global bot control flag for web interface
 bot_running_flag = False
 last_heartbeat = None  # Updated each scrape cycle
+trigger_scrape_now = False  # Set to True when manual scrape is requested
 # ========================================================
 
 @dataclass
@@ -107,6 +113,17 @@ class BotConfig:
     # Channel support
     chat_ids: List[str] = None  # Multiple Telegram channels
     
+    # Custom post template
+    post_template: str = """📢 <b>New Auction Listed!</b>
+
+📦 <b>Asset:</b> {name}
+🆔 <b>Lot No:</b> {lot_no}
+💰 <b>Initial Price:</b> {initial_price}
+⏳ <b>End Date:</b> {end_date_time}
+⚡ <b>Type:</b> {auction_type}
+
+🔗 <a href='{target_url}'>View details</a>"""
+    
     def __post_init__(self):
         # Initialize list fields with defaults
         if self.auction_types is None:
@@ -119,6 +136,16 @@ class BotConfig:
             self.business_days = []
         if self.chat_ids is None:
             self.chat_ids = [CHAT_ID]  # Default to single channel
+        if self.post_template is None or not self.post_template.strip():
+            self.post_template = """📢 <b>New Auction Listed!</b>
+
+📦 <b>Asset:</b> {name}
+🆔 <b>Lot No:</b> {lot_no}
+💰 <b>Initial Price:</b> {initial_price}
+⏳ <b>End Date:</b> {end_date_time}
+⚡ <b>Type:</b> {auction_type}
+
+🔗 <a href='{target_url}'>View details</a>"""
     
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -155,6 +182,16 @@ class BotConfig:
             data['business_hours_end'] = None
         if 'business_days' not in data:
             data['business_days'] = []
+        if 'post_template' not in data or not data['post_template']:
+            data['post_template'] = """📢 <b>New Auction Listed!</b>
+
+📦 <b>Asset:</b> {name}
+🆔 <b>Lot No:</b> {lot_no}
+💰 <b>Initial Price:</b> {initial_price}
+⏳ <b>End Date:</b> {end_date_time}
+⚡ <b>Type:</b> {auction_type}
+
+🔗 <a href='{target_url}'>View details</a>"""
         
         return cls(**data)
 
@@ -167,48 +204,123 @@ def validate_url(url: str) -> bool:
         return False
 
 def load_config() -> BotConfig:
-    """Load bot configuration from JSON file with validation."""
-    default_config = BotConfig(
-        target_urls=[DEFAULT_TARGET_URL],
-        check_interval=CHECK_INTERVAL
-    )
+    """Load bot configuration with environment variable overrides."""
+    config_data = {}
     
+    # 1. Load from file if it exists
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding='utf-8') as f:
                 config_data = json.load(f)
-                
-            # Handle backward compatibility: convert single target_url to target_urls
-            if "target_url" in config_data and "target_urls" not in config_data:
-                config_data["target_urls"] = [config_data["target_url"]]
-                del config_data["target_url"]
-            
-            # Validate target_urls
-            if "target_urls" in config_data:
-                valid_urls = [url for url in config_data["target_urls"] if validate_url(url)]
-                if not valid_urls:
-                    logger.warning(f"No valid target_urls in config, using default")
-                    return default_config
-                config_data["target_urls"] = valid_urls
-            
-            # Validate check_interval
-            if "check_interval" in config_data:
-                try:
-                    interval = int(config_data["check_interval"])
-                    if interval < 60:
-                        logger.warning("check_interval too low, setting to minimum 60 seconds")
-                        config_data["check_interval"] = 60
-                except (ValueError, TypeError):
-                    logger.warning("Invalid check_interval, using default")
-                    config_data["check_interval"] = CHECK_INTERVAL
-            
-            return BotConfig.from_dict(config_data)
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in config file: {e}")
         except Exception as e:
-            logger.error(f"Error loading config: {e}")
+            logger.error(f"Error loading config file: {e}")
+            config_data = {}
+            
+    # 2. Override with environment variables
+    # Target URLs
+    env_urls = os.getenv("BOT_TARGET_URLS") or os.getenv("TARGET_URLS") or os.getenv("TARGET_URL")
+    if env_urls:
+        if env_urls.strip().startswith("[") and env_urls.strip().endswith("]"):
+            try:
+                config_data["target_urls"] = json.loads(env_urls)
+            except Exception:
+                config_data["target_urls"] = [url.strip() for url in env_urls.split(",") if url.strip()]
+        else:
+            config_data["target_urls"] = [url.strip() for url in env_urls.split(",") if url.strip()]
+            
+    # Check Interval
+    env_interval = os.getenv("BOT_CHECK_INTERVAL") or os.getenv("CHECK_INTERVAL")
+    if env_interval:
+        try:
+            config_data["check_interval"] = int(env_interval)
+        except ValueError:
+            pass
+            
+    # Hourly Post Limit
+    env_limit = os.getenv("BOT_HOURLY_POST_LIMIT")
+    if env_limit:
+        try:
+            config_data["hourly_post_limit"] = int(env_limit)
+        except ValueError:
+            pass
+            
+    # Min/Max Price
+    env_min_price = os.getenv("BOT_MIN_PRICE")
+    if env_min_price:
+        try:
+            config_data["min_price"] = float(env_min_price)
+        except ValueError:
+            pass
+    env_max_price = os.getenv("BOT_MAX_PRICE")
+    if env_max_price:
+        try:
+            config_data["max_price"] = float(env_max_price)
+        except ValueError:
+            pass
+            
+    # Auction Types
+    env_types = os.getenv("BOT_AUCTION_TYPES")
+    if env_types:
+        config_data["auction_types"] = [t.strip() for t in env_types.split(",") if t.strip()]
+        
+    # Keywords
+    env_include = os.getenv("BOT_INCLUDE_KEYWORDS")
+    if env_include:
+        config_data["include_keywords"] = [k.strip() for k in env_include.split(",") if k.strip()]
+    env_exclude = os.getenv("BOT_EXCLUDE_KEYWORDS")
+    if env_exclude:
+        config_data["exclude_keywords"] = [k.strip() for k in env_exclude.split(",") if k.strip()]
+        
+    # Business Hours
+    env_hours_start = os.getenv("BOT_BUSINESS_HOURS_START")
+    if env_hours_start:
+        config_data["business_hours_start"] = env_hours_start.strip()
+    env_hours_end = os.getenv("BOT_BUSINESS_HOURS_END")
+    if env_hours_end:
+        config_data["business_hours_end"] = env_hours_end.strip()
+        
+    # Business Days
+    env_days = os.getenv("BOT_BUSINESS_DAYS")
+    if env_days:
+        try:
+            config_data["business_days"] = [int(d.strip()) for d in env_days.split(",") if d.strip()]
+        except ValueError:
+            pass
+            
+    # Chat IDs
+    env_chat_ids = os.getenv("BOT_CHAT_IDS")
+    if env_chat_ids:
+        config_data["chat_ids"] = [c.strip() for c in env_chat_ids.split(",") if c.strip()]
+        
+    # Post Template
+    env_template = os.getenv("BOT_POST_TEMPLATE")
+    if env_template:
+        config_data["post_template"] = env_template
+        
+    # 3. Handle backward compatibility and defaults
+    if "target_url" in config_data and "target_urls" not in config_data:
+        config_data["target_urls"] = [config_data["target_url"]]
+        del config_data["target_url"]
+        
+    if "target_urls" not in config_data or not config_data["target_urls"]:
+        config_data["target_urls"] = [DEFAULT_TARGET_URL]
+        
+    # Validate URLs
+    config_data["target_urls"] = [url for url in config_data["target_urls"] if validate_url(url)]
+    if not config_data["target_urls"]:
+        config_data["target_urls"] = [DEFAULT_TARGET_URL]
+        
+    # Validate interval
+    interval = config_data.get("check_interval", CHECK_INTERVAL)
+    try:
+        interval = int(interval)
+        if interval < 60:
+            interval = 60
+    except (ValueError, TypeError):
+        interval = CHECK_INTERVAL
+    config_data["check_interval"] = interval
     
-    return default_config
+    return BotConfig.from_dict(config_data)
 
 def save_config(config: BotConfig) -> bool:
     """Save bot configuration to JSON file."""
@@ -352,6 +464,10 @@ def retry_request(func, *args, max_retries: int = MAX_RETRIES, **kwargs) -> Opti
                 wait_time = min(RETRY_DELAY * (2 ** attempt) + random.uniform(0, 2), 60)
                 logger.warning(f"Rate limited, waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}")
                 time.sleep(wait_time)
+            elif 400 <= response.status_code < 500:
+                # Client errors (400, 401, 403, 404) are permanent — retrying won't help
+                logger.warning(f"Client error {response.status_code} (not retrying): {response.text[:200]}")
+                return response
             else:
                 logger.warning(f"Request failed with status {response.status_code}, attempt {attempt + 1}/{max_retries}")
                 if attempt < max_retries - 1:
@@ -372,13 +488,16 @@ def retry_request(func, *args, max_retries: int = MAX_RETRIES, **kwargs) -> Opti
             break
     return None
 
-def send_telegram_text_message(chat_id: str, text: str) -> bool:
+def send_telegram_text_message(chat_id: str, text: str, reply_markup: Optional[Dict[str, Any]] = None) -> bool:
     """Send a text message to a Telegram chat with retry logic."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": chat_id,
-        "text": text
+        "text": text,
+        "parse_mode": "HTML"
     }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     
     proxies = PROXIES if USE_PROXY else None
     logger.info(f"Sending message to chat {chat_id} (proxy: {USE_PROXY})")
@@ -405,10 +524,24 @@ def send_telegram_text_message(chat_id: str, text: str) -> bool:
         logger.error(f"Exception sending message to chat {chat_id}: {e}")
         return False
 
+def answer_telegram_callback_query(callback_query_id: str, text: Optional[str] = None):
+    """Answer a Telegram callback query to clear the loading state on the button click."""
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
+    payload = {
+        "callback_query_id": callback_query_id
+    }
+    if text:
+        payload["text"] = text
+    proxies = PROXIES if USE_PROXY else None
+    try:
+        retry_request(requests.post, url, json=payload, proxies=proxies, timeout=10)
+    except Exception as e:
+        logger.error(f"Error answering callback query: {e}")
+
 def get_telegram_updates(offset: int = 0) -> List[Dict[str, Any]]:
     """Get updates from Telegram bot with retry logic."""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-    params = {"offset": offset, "timeout": 10}
+    params = {"offset": offset, "timeout": 0, "limit": 100}
     
     proxies = PROXIES if USE_PROXY else None
     response = retry_request(requests.get, url, params=params, proxies=proxies, timeout=15)
@@ -422,6 +555,21 @@ def is_authorized(user_id: Optional[int]) -> bool:
     if ADMIN_CHAT_ID is None:
         return True
     return str(user_id) == str(ADMIN_CHAT_ID)
+
+def get_menu_keyboard() -> Dict[str, Any]:
+    """Return the inline keyboard markup for the bot menu."""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📊 Status", "callback_data": "menu_status"},
+                {"text": "📈 Stats", "callback_data": "menu_stats"}
+            ],
+            [
+                {"text": "🔄 Scrape Now", "callback_data": "menu_scrape"},
+                {"text": "⏱️ Uptime", "callback_data": "menu_uptime"}
+            ]
+        ]
+    }
 
 def handle_command(message: Dict[str, Any], config: BotConfig) -> BotConfig:
     """Handle incoming Telegram commands."""
@@ -438,19 +586,11 @@ def handle_command(message: Dict[str, Any], config: BotConfig) -> BotConfig:
     if message["chat"].get("type") != "private":
         return config
     
-    if text.startswith("/start"):
+    if text.startswith("/start") or text.startswith("/menu"):
         send_telegram_text_message(chat_id, 
-            "🤖 <b>Auction Bot Started!</b>\n\n"
-            "Commands:\n"
-            "/addurl <url> - Add target auction URL\n"
-            "/listurls - List all target URLs\n"
-            "/removeurl <index> - Remove URL by index\n"
-            "/setlimit <number> - Set daily post limit per category\n"
-            "/filter - Set price/type/keyword filters\n"
-            "/schedule - Set business hours/days\n"
-            "/channels - Manage Telegram channels\n"
-            "/status - Show current configuration\n"
-            "/help - Show this help message"
+            "🤖 <b>Welcome to Auction Bot Menu!</b>\n\n"
+            "Use the buttons below to control and monitor the bot, or type `/help` for a list of all commands.",
+            reply_markup=get_menu_keyboard()
         )
     
     elif text.startswith("/help"):
@@ -861,6 +1001,139 @@ def handle_command(message: Dict[str, Any], config: BotConfig) -> BotConfig:
     
     return config
 
+def handle_callback_query(callback_query: Dict[str, Any], config: BotConfig) -> None:
+    """Handle incoming Telegram inline button callback queries."""
+    global trigger_scrape_now
+    
+    query_id = callback_query["id"]
+    chat_id = callback_query["message"]["chat"]["id"]
+    data = callback_query.get("data", "")
+    user_id = callback_query.get("from", {}).get("id")
+    
+    # Check authorization (same as command checks)
+    if not is_authorized(user_id):
+        answer_telegram_callback_query(query_id, "❌ Unauthorized")
+        send_telegram_text_message(chat_id, "❌ You are not authorized to use these buttons.")
+        return
+        
+    logger.info(f"Received callback query '{data}' from user {user_id}")
+    
+    if data == "menu_status":
+        answer_telegram_callback_query(query_id, "Fetching Status...")
+        posted_count = len(load_posted_auctions())
+        urls_text = "\n".join([f"{i+1}. {url}" for i, url in enumerate(config.target_urls)])
+        channels_text = "\n".join([f"{i+1}. {cid}" for i, cid in enumerate(config.chat_ids)])
+        
+        filter_info = "None"
+        if config.min_price or config.max_price or config.auction_types or config.include_keywords or config.exclude_keywords:
+            filter_parts = []
+            if config.min_price or config.max_price:
+                filter_parts.append(f"Price: {config.min_price or '0'}-{config.max_price or '∞'}")
+            if config.auction_types:
+                filter_parts.append(f"Types: {', '.join(config.auction_types)}")
+            if config.include_keywords:
+                filter_parts.append(f"Include: {', '.join(config.include_keywords)}")
+            if config.exclude_keywords:
+                filter_parts.append(f"Exclude: {', '.join(config.exclude_keywords)}")
+            filter_info = "\n".join(filter_parts)
+            
+        send_telegram_text_message(chat_id,
+            f"📊 <b>Bot Configuration:</b>\n\n"
+            f"🔗 Target URLs ({len(config.target_urls)}):\n{urls_text}\n\n"
+            f"📢 Channels ({len(config.chat_ids)}):\n{channels_text}\n\n"
+            f"⏱️ Check Interval: {config.check_interval} seconds\n"
+            f"📊 Hourly Limit: {config.hourly_post_limit} posts/cat\n"
+            f"📋 Filters:\n{filter_info}"
+        )
+        
+    elif data == "menu_stats":
+        answer_telegram_callback_query(query_id, "Fetching Stats...")
+        analytics = load_analytics()
+        total = analytics.get('total_posts', 0)
+        success = analytics.get('successful_posts', 0)
+        failed = analytics.get('failed_posts', 0)
+        rate = analytics.get('success_rate', 0)
+        
+        current_hour = datetime.now().strftime("%Y-%m-%d %H:00")
+        hour_count = get_daily_post_count(current_hour, 'all')
+        
+        send_telegram_text_message(chat_id,
+            f"📈 <b>Analytics Summary:</b>\n\n"
+            f"📊 Total Posts: {total}\n"
+            f"✅ Successful: {success}\n"
+            f"❌ Failed: {failed}\n"
+            f"📊 Success Rate: {rate:.1f}%\n"
+            f"📅 Current Hour: {hour_count} posts"
+        )
+        
+    elif data == "menu_scrape":
+        answer_telegram_callback_query(query_id, "⚡ Triggering Scrape!")
+        trigger_scrape_now = True
+        send_telegram_text_message(chat_id, "⚡ <b>Scraper Triggered!</b> Checking target URLs now...")
+        
+    elif data == "menu_uptime":
+        answer_telegram_callback_query(query_id, "Checking Uptime...")
+        try:
+            import web_app
+            if web_app.bot_start_time:
+                uptime_sec = int(time.time() - web_app.bot_start_time)
+                h = uptime_sec // 3600
+                m = (uptime_sec % 3600) // 60
+                s = uptime_sec % 60
+                uptime_str = f"{h}h {m}m {s}s"
+            else:
+                uptime_str = "Not started / stopped"
+        except:
+            uptime_str = "Unknown"
+            
+        send_telegram_text_message(chat_id, f"⏱️ <b>Bot Uptime:</b> {uptime_str}")
+        
+    else:
+        answer_telegram_callback_query(query_id, "Unknown Action")
+
+def format_template(template: str, **kwargs) -> str:
+    """Safely format template by replacing {key} placeholders."""
+    result = template
+    for key, val in kwargs.items():
+        placeholder = "{" + key + "}"
+        result = result.replace(placeholder, str(val))
+    return result
+
+def check_closing_soon_alerts(config: BotConfig):
+    """Check for auctions closing soon and send alerts to Telegram."""
+    from datetime import timedelta
+    # Ethiopia is EAT (UTC+3)
+    eat_now = datetime.utcnow() + timedelta(hours=3)
+    now_str = eat_now.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Check for auctions ending in the next 60 minutes
+    closing_auctions = database.get_auctions_needing_closing_alert(now_str, alert_threshold_minutes=60)
+    
+    for item in closing_auctions:
+        lot_no = item['lot_no']
+        name = item['name']
+        end_date_str = item['end_date']
+        minutes_left = item['minutes_left']
+        category_url = item['category']
+        
+        alert_text = (
+            f"⏰ <b>Closing Soon Alert!</b>\n\n"
+            f"📦 <b>Asset:</b> {name}\n"
+            f"🆔 <b>Lot No:</b> {lot_no}\n"
+            f"⏳ <b>Closes in:</b> {minutes_left} minutes (at {end_date_str})\n\n"
+            f"🔗 <a href='{category_url or DEFAULT_TARGET_URL}'>View Category</a>"
+        )
+        
+        # Post to all configured channels
+        success = False
+        for chat_id in config.chat_ids:
+            if send_telegram_text_message(chat_id, alert_text):
+                success = True
+                
+        if success:
+            database.mark_closing_alert_sent(lot_no)
+            logger.info(f"Sent closing soon alert for Lot {lot_no} (ends in {minutes_left}m)")
+
 def send_telegram_message(
     name: str,
     lot_no: str,
@@ -869,17 +1142,21 @@ def send_telegram_message(
     auction_type: str,
     image_url: Optional[str],
     target_url: str,
-    chat_ids: List[str]
+    chat_ids: List[str],
+    config: Optional[BotConfig] = None
 ) -> bool:
     """Formulate the HTML message and push it to multiple Telegram channels."""
-    caption = (
-        f"📢 <b>New Auction Listed!</b>\n\n"
-        f"📦 <b>Asset:</b> {name}\n"
-        f"🆔 <b>Lot No:</b> {lot_no}\n"
-        f"💰 <b>Initial Price:</b> {initial_price}\n"
-        f"⏳ <b>End Date:</b> {end_date_time}\n"
-        f"⚡ <b>Type:</b> {auction_type}\n\n"
-        f"🔗 <a href='{target_url}'>View details</a>"
+    if not config:
+        config = load_config()
+        
+    caption = format_template(
+        config.post_template,
+        name=name,
+        lot_no=lot_no,
+        initial_price=initial_price,
+        end_date_time=end_date_time,
+        auction_type=auction_type,
+        target_url=target_url
     )
 
     # Add delay to avoid rate limiting (reduced from 1.5s to 0.5s)
@@ -1147,12 +1424,21 @@ async def scrape_auctions(
             auction_type=auction_type,
             image_url=image_url,
             target_url=target_url,
-            chat_ids=config.chat_ids
+            chat_ids=config.chat_ids,
+            config=config
         )
         
         if success:
             posted_auctions.add(lot_no)
             increment_daily_post(current_hour, target_url)
+            # Save to database with detailed metadata including end_date
+            database.add_posted_auction(
+                lot_no=lot_no,
+                category=target_url,
+                name=name,
+                price=initial_price,
+                end_date=end_date_time
+            )
             # Add to scrape cache
             if target_url not in scrape_cache:
                 scrape_cache[target_url] = {}
@@ -1177,7 +1463,7 @@ async def scrape_auctions(
 
 async def main() -> None:
     """Main bot loop with graceful shutdown handling."""
-    global bot_running_flag, last_heartbeat
+    global bot_running_flag, last_heartbeat, trigger_scrape_now
     bot_running_flag = True
     
     logger.info("="*50)
@@ -1207,14 +1493,26 @@ async def main() -> None:
             logger.info("Browser launched successfully")
             
             while bot_running_flag:
-                # Check for Telegram commands
+                # Check for Telegram commands & callback queries
                 updates = get_telegram_updates(update_offset)
                 for update in updates:
                     update_offset = update["update_id"] + 1
                     if "message" in update and "text" in update["message"]:
                         message = update["message"]
+                        chat_type = message.get("chat", {}).get("type", "unknown")
+                        msg_text = message.get("text", "")
+                        logger.info(f"📨 Update: chat_type={chat_type}, text={msg_text!r}")
                         if message["text"].startswith("/"):
                             config = handle_command(message, config)
+                    elif "callback_query" in update:
+                        logger.info(f"🔘 Callback query: data={update['callback_query'].get('data')!r}")
+                        handle_callback_query(update["callback_query"], config)
+                
+                # Check for auctions closing soon
+                try:
+                    check_closing_soon_alerts(config)
+                except Exception as e:
+                    logger.error(f"Error checking closing soon alerts: {e}")
                 
                 # Scrape auctions from all URLs concurrently
                 if config.target_urls:
@@ -1263,10 +1561,14 @@ async def main() -> None:
                 # Update heartbeat after each scrape cycle
                 last_heartbeat = datetime.now().isoformat()
                 
-                # Wait for next check (with interruption support)
+                # Wait for next check (with interruption and manual trigger support)
                 logger.info(f"Waiting {config.check_interval} seconds before next check...")
                 for _ in range(config.check_interval):
                     if not bot_running_flag:
+                        break
+                    if trigger_scrape_now:
+                        logger.info("Manual scrape requested, waking up...")
+                        trigger_scrape_now = False
                         break
                     await asyncio.sleep(1)
     
