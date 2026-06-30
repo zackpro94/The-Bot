@@ -136,7 +136,7 @@ Send these commands to your bot in Telegram:
 
 **Example:**
 ```
-/seturl https://auction2.andmtaskills.com/category/auctions/5
+/seturl https://example.com/catagory/3
 ```
 
 ## 📁 File Structure
